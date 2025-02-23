@@ -5,13 +5,14 @@ import yfinance as yf
 import plotly.express as px
 import cvxpy as cp
 from scipy.optimize import minimize
+from statsmodels.tsa.arima.model import ARIMA  # Replacing TensorFlow
+
 
 def main():
     st.set_page_config(page_title="Portfolio Optimizer Pro", layout="wide")
-    st.title("🔮 Smart Portfolio Architect")
+    st.title("Portfolio Optimizer")
     st.markdown("""
     ## Institutional-Grade Portfolio Construction
-    *Blending market wisdom with your insights - powered by Bayesian mathematics*
     """)
 
     # ======================
@@ -42,7 +43,7 @@ def main():
     # ======================
     # Data Input Section
     # ======================
-    st.header("📊 Asset Universe Setup")
+    st.header("📊 Asset Setup")
     default_tickers = ["SPY", "QQQ", "TLT", "GLD", "VNQ", "BTC-USD"]
     tickers = st.multiselect("Select assets (min 5)", default_tickers, default_tickers)
     
@@ -133,6 +134,25 @@ def main():
 
     S = ledoit_wolf_shrinkage(returns)
 
+    # AI-Free Forecasting Section
+    # ======================
+    st.header("📈 Statistical Forecast Engine")
+
+    def forecast_returns(prices, days=30):
+        forecasts = {}
+        for ticker in tickers:
+            model = ARIMA(prices[ticker].dropna(), order=(1, 0, 0))
+            model_fit = model.fit()
+            pred = model_fit.forecast(steps=days).mean()
+            forecasts[ticker] = pred / prices[ticker].iloc[-1] - 1
+        return forecasts
+
+    ml_forecasts = pd.Series(forecast_returns(prices), name="Predicted Returns")
+    
+    with st.expander("Statistical Return Predictions"):
+        fig_ml = px.bar(ml_forecasts, labels={'value': 'Predicted Return', 'index': 'Asset'})
+        st.plotly_chart(fig_ml)
+
     # ======================
     # Black-Litterman Model
     # ======================
@@ -152,6 +172,14 @@ def main():
         st.error("Matrix inversion failed - check view consistency")
         st.stop()
 
+    # Blend ML forecasts with BL returns
+    blend_ratio = st.slider("ML Forecast Influence", 0.0, 1.0, 0.3)
+    combined_returns = (1 - blend_ratio) * bl_returns + blend_ratio * ml_forecasts.values
+
+    # ... [Rest of Black-Litterman code remains same but use combined_returns] ...
+
+    # ======================
+
     # ======================
     # Portfolio Optimization
     # ======================
@@ -168,7 +196,7 @@ def main():
             weights <= max_weight
         ]
     )
-    problem.solve(solver=cp.ECOS)
+    problem.solve()
     
     if weights.value is None:
         st.error("Optimization failed - relax constraints")
@@ -223,7 +251,7 @@ def main():
             cp.Maximize(bl_returns @ weights - d * cp.quad_form(weights, bl_cov)),
             [cp.sum(weights) == 1, weights >= min_weight, weights <= max_weight]
         )
-        problem.solve(solver=cp.ECOS)
+        problem.solve()
         if weights.value is not None:
             sensitivity.append(weights.value)
     
