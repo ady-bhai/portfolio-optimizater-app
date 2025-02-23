@@ -5,8 +5,7 @@ import yfinance as yf
 import plotly.express as px
 import cvxpy as cp
 from scipy.optimize import minimize
-from statsmodels.tsa.arima.model import ARIMA  # Replacing TensorFlow
-
+from statsmodels.tsa.arima.model import ARIMA
 
 def main():
     st.set_page_config(page_title="Portfolio Optimizer Pro", layout="wide")
@@ -51,10 +50,12 @@ def main():
     @st.cache_data
     def load_data(tickers):
         try:
-            df = yf.download(tickers, period="5y")['Adj Close']
+            data = yf.download(tickers, period="5y")
+            df = data['Adj Close']
             # Handle single ticker case
-            if len(tickers) == 1:
-                df = pd.DataFrame(df).rename(columns={'Adj Close': tickers[0]})
+            if isinstance(df, pd.Series):
+                df = pd.DataFrame(df)
+                df.columns = [tickers[0]]
             return df.ffill().dropna()
         except Exception as e:
             st.error(f"Data loading failed: {str(e)}")
@@ -65,9 +66,9 @@ def main():
                 index=dates,
                 columns=tickers
             )
+    
     prices = load_data(tickers)
     returns = prices.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
-
 
     # ======================
     # View Configuration
@@ -134,23 +135,43 @@ def main():
 
     S = ledoit_wolf_shrinkage(returns)
 
-    # AI-Free Forecasting Section
+    # ======================
+    # Statistical Forecast Engine
     # ======================
     st.header("📈 Statistical Forecast Engine")
 
-    def forecast_returns(prices, days=30):
+    def forecast_returns(prices_df, days=30):
         forecasts = {}
-        for ticker in tickers:
-            model = ARIMA(prices[ticker].dropna(), order=(1, 0, 0))
-            model_fit = model.fit()
-            pred = model_fit.forecast(steps=days).mean()
-            forecasts[ticker] = pred / prices[ticker].iloc[-1] - 1
-        return forecasts
+        for ticker in prices_df.columns:
+            try:
+                # Get the price series for the current ticker
+                prices_series = prices_df[ticker].dropna()
+                # Calculate log returns
+                log_prices = np.log(prices_series)
+                # Fit ARIMA model
+                model = ARIMA(log_prices, order=(1, 1, 1))
+                model_fit = model.fit()
+                # Make prediction
+                forecast = model_fit.forecast(steps=days)
+                # Convert log prediction to return
+                pred_return = (np.exp(forecast.mean()) / prices_series.iloc[-1]) - 1
+                forecasts[ticker] = pred_return
+            except Exception as e:
+                st.warning(f"Forecasting failed for {ticker}: {str(e)}")
+                forecasts[ticker] = returns[ticker].mean()  # Use historical mean as fallback
+        
+        return pd.Series(forecasts)
 
-    ml_forecasts = pd.Series(forecast_returns(prices), name="Predicted Returns")
-    
+    # Generate forecasts
+    with st.spinner("Generating statistical forecasts..."):
+        ml_forecasts = forecast_returns(prices)
+        
+    # Display forecasts
     with st.expander("Statistical Return Predictions"):
-        fig_ml = px.bar(ml_forecasts, labels={'value': 'Predicted Return', 'index': 'Asset'})
+        fig_ml = px.bar(ml_forecasts, 
+                       labels={'value': 'Predicted Return', 'index': 'Asset'},
+                       title="30-Day Return Forecasts")
+        fig_ml.update_layout(showlegend=False)
         st.plotly_chart(fig_ml)
 
     # ======================
@@ -176,15 +197,11 @@ def main():
     blend_ratio = st.slider("ML Forecast Influence", 0.0, 1.0, 0.3)
     combined_returns = (1 - blend_ratio) * bl_returns + blend_ratio * ml_forecasts.values
 
-    # ... [Rest of Black-Litterman code remains same but use combined_returns] ...
-
-    # ======================
-
     # ======================
     # Portfolio Optimization
     # ======================
     weights = cp.Variable(num_assets)
-    ret = bl_returns @ weights
+    ret = combined_returns @ weights
     risk = cp.quad_form(weights, bl_cov)
     transaction_cost = lambda_tc * cp.norm(weights, 1)
     
@@ -215,7 +232,7 @@ def main():
         st.plotly_chart(fig, use_container_width=True)
     
     with col2:
-        portfolio_ret = optimal_weights @ bl_returns
+        portfolio_ret = optimal_weights @ combined_returns
         portfolio_vol = np.sqrt(optimal_weights @ bl_cov @ optimal_weights)
         sharpe = portfolio_ret / portfolio_vol
         
@@ -248,7 +265,7 @@ def main():
     sensitivity = []
     for d in deltas:
         problem = cp.Problem(
-            cp.Maximize(bl_returns @ weights - d * cp.quad_form(weights, bl_cov)),
+            cp.Maximize(combined_returns @ weights - d * cp.quad_form(weights, bl_cov)),
             [cp.sum(weights) == 1, weights >= min_weight, weights <= max_weight]
         )
         problem.solve()
